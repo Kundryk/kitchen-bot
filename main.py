@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Конфігурація
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHATLLM_API_KEY = os.getenv('CHATLLM_API_KEY')  # Додай це в Railway
-CHATLLM_API_URL = "https://api.abacus.ai/v1/chat/completions"  # URL для RouteLLM
+CHATLLM_API_URL = "https://routellm.abacus.ai/v1/chat/completions"  # URL для RouteLLM
 
 class KitchenBot:
     def __init__(self):
