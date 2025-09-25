@@ -1,4 +1,4 @@
-kitchen_core_code = '''from database import KitchenDatabase
+from database import KitchenDatabase
 from datetime import datetime, timedelta
 import re
 
@@ -251,4 +251,3 @@ def get_consumption_stats(user_id, days=7):
             continue
     
     return stats
-'''
