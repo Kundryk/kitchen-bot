@@ -1,10 +1,27 @@
 import gspread
+import os
+import json
 from datetime import datetime
+from google.oauth2.service_account import Credentials
 
 class KitchenDatabase:
-    def __init__(self, credentials_file="credentials.json"):
-        self.gc = gspread.service_account(filename=credentials_file)
-        self.sh = self.gc.open("kitchen_products")  # твоя основна таблиця
+    def __init__(self):
+        # Тепер беремо креденшіали з ENV (як у твоєму старому коді)
+        creds_env = os.environ.get("GOOGLE_CREDENTIALS")
+        if not creds_env:
+            raise ValueError("❌ Змінна GOOGLE_CREDENTIALS не знайдена в Railway!")
+
+        service_account_info = json.loads(creds_env)
+        creds = Credentials.from_service_account_info(
+            service_account_info,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+        )
+
+        client = gspread.authorize(creds)
+        self.sh = client.open("kitchen_products")
 
     def get_products_sheet(self):
         return self.sh.worksheet("kitchen_products")
