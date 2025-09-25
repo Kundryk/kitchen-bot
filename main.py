@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -159,6 +160,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📋 Команди:
    • /products - показати всі продукти
+   • /remove 250 г сирників - відняти продукт
    • /test_add - тест додавання
    • /test_remove - тест віднімання
 
@@ -166,10 +168,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await update.message.reply_text(welcome_message)
 
+# --- /remove: ручне віднімання без AI ---
+REMOVE_RX = re.compile(r"^/remove\s+(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+)$", re.IGNORECASE)
+
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /remove для ручного віднімання продуктів"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    m = REMOVE_RX.match(text)
+    if not m:
+        await update.message.reply_text("Формат: /remove 250 г сирників")
+        return
+    qty = float(m.group("qty").replace(",", "."))
+    unit = m.group("unit").lower()
+    name = m.group("name").strip()
+    # нормалізація одиниць
+    unit = "г" if unit in ["г", "гр"] else unit
+    result = remove_product(user_id, name, qty, unit)
+    await update.message.reply_text(result)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробка звичайних повідомлень з новою логікою"""
     user_id = update.effective_user.id
     message_text = update.message.text
+    
+    # Швидка перевірка на споживання без AI
+    low = message_text.lower()
+    if any(kw in low for kw in ["з'їв", "зїв", "з'їв", "з'їла", "відніми", "відняти", "мінус", "використав", "витратив"]):
+        # Проста евристика: спробувати витягти кількість+одиницю+назву
+        m = re.search(r"(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+?)(?:\s|$)", low, re.IGNORECASE)
+        if m:
+            qty = float(m.group("qty").replace(",", "."))
+            unit = m.group("unit").lower()
+            unit = "г" if unit in ["г", "гр"] else unit
+            name = m.group("name").strip()
+            result = remove_product(user_id, name, qty, unit)
+            await update.message.reply_text(result)
+            return
     
     await update.message.reply_text("🤔 Аналізую твоє повідомлення...")
     
@@ -255,6 +290,7 @@ def main():
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("products", show_products))
+    application.add_handler(CommandHandler("remove", cmd_remove))
     application.add_handler(CommandHandler("test_add", test_add))
     application.add_handler(CommandHandler("test_remove", test_remove))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
