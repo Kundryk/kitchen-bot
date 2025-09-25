@@ -1,4 +1,4 @@
-database_code = '''import gspread
+import gspread
 import os
 import json
 from datetime import datetime
@@ -67,4 +67,3 @@ class KitchenDatabase:
         logs = self.get_logs_sheet()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logs.append_row([str(user_id), product_name, delta_qty, unit, action, timestamp])
-'''
