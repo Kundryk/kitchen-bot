@@ -1,4 +1,4 @@
-main_code = '''import os
+import os
 import json
 import logging
 import re
@@ -134,8 +134,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_message)
 
 # Регулярні вирази для швидкого парсингу
-REMOVE_RX = re.compile(r"^/remove\\s+(?P<qty>[\\d.,]+)\\s*(?P<unit>г|гр|кг|мл|л|шт)\\s+(?P<name>.+)$", re.IGNORECASE)
-QUICK_REMOVE_RX = re.compile(r"(?P<qty>[\\d.,]+)\\s*(?P<unit>г|гр|кг|мл|л|шт)\\s+(?P<name>.+?)(?:\\s|$)", re.IGNORECASE)
+REMOVE_RX = re.compile(r"^/remove\s+(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+)$", re.IGNORECASE)
+QUICK_REMOVE_RX = re.compile(r"(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+?)(?:\s|$)", re.IGNORECASE)
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /remove для точного віднімання"""
@@ -195,9 +195,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif intent["action"] == "query":
         found_products = find_product(user_id, intent["product_name"])
         if found_products:
-            response = f"🔍 Знайшов {intent['product_name']}:\\n\\n"
+            response = f"🔍 Знайшов {intent['product_name']}:\n\n"
             for product in found_products:
-                response += f"• {product['quantity']}{product['unit']} {product['product_name']}\\n"
+                response += f"• {product['quantity']}{product['unit']} {product['product_name']}\n"
         else:
             response = f"❌ У тебе немає {intent['product_name']}"
         await update.message.reply_text(response)
@@ -242,15 +242,15 @@ async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             categories["Звичайні"].append(product)
     
-    response = "📦 Твої продукти:\\n\\n"
+    response = "📦 Твої продукти:\n\n"
     for cat_name, items in categories.items():
         if items:
-            response += f"**{cat_name}:**\\n"
+            response += f"**{cat_name}:**\n"
             for product in items:
                 clean_name = product["product_name"].replace("[МОРОЗИЛКА]", "").replace("[ГОТОВА_ЇЖА]", "").replace("[МОРОЗИЛКА_ГОТОВА]", "").strip()
                 expiry_info = f" (до {product['expiry_date']})" if product.get('expiry_date') else ""
-                response += f"• {product['quantity']}{product['unit']} {clean_name}{expiry_info}\\n"
-            response += "\\n"
+                response += f"• {product['quantity']}{product['unit']} {clean_name}{expiry_info}\n"
+            response += "\n"
     
     await update.message.reply_text(response)
 
@@ -263,7 +263,7 @@ async def show_expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Немає продуктів, що скоро псуються!")
         return
     
-    response = "⚠️ Продукти, що скоро псуються:\\n\\n"
+    response = "⚠️ Продукти, що скоро псуються:\n\n"
     for product in expiring:
         days_left = product["days_left"]
         if days_left < 0:
@@ -276,7 +276,7 @@ async def show_expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status = f"📅 {days_left} днів"
         
         clean_name = product["product_name"].replace("[МОРОЗИЛКА]", "").replace("[ГОТОВА_ЇЖА]", "").strip()
-        response += f"• {product['quantity']}{product['unit']} {clean_name} - {status}\\n"
+        response += f"• {product['quantity']}{product['unit']} {clean_name} - {status}\n"
     
     await update.message.reply_text(response)
 
@@ -289,9 +289,9 @@ async def show_shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 Список покупок порожній!")
         return
     
-    response = "🛒 Список покупок:\\n\\n"
+    response = "🛒 Список покупок:\n\n"
     for item in shopping:
-        response += f"• {item['quantity']}{item['unit']} {item['item']}\\n"
+        response += f"• {item['quantity']}{item['unit']} {item['item']}\n"
     
     await update.message.reply_text(response)
 
@@ -300,18 +300,18 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_consumption_stats(user_id, days=7)
     
-    response = "📊 Статистика за тиждень:\\n\\n"
+    response = "📊 Статистика за тиждень:\n\n"
     
     if stats["consumed"]:
-        response += "🍽️ **Спожито:**\\n"
+        response += "🍽️ **Спожито:**\n"
         for item in stats["consumed"][:5]:  # топ 5
-            response += f"• {item['quantity']}г/мл {item['product']}\\n"
-        response += "\\n"
+            response += f"• {item['quantity']}г/мл {item['product']}\n"
+        response += "\n"
     
     if stats["added"]:
-        response += "📦 **Додано:**\\n"
+        response += "📦 **Додано:**\n"
         for item in stats["added"][:5]:  # топ 5
-            response += f"• {item['quantity']}г/мл {item['product']}\\n"
+            response += f"• {item['quantity']}г/мл {item['product']}\n"
     
     if not stats["consumed"] and not stats["added"]:
         response += "Поки що немає активності 🤷‍♂️"
@@ -350,20 +350,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-'''
-
-# Записуємо файли
-with open('database.py', 'w', encoding='utf-8') as f:
-    f.write(database_code)
-
-with open('kitchen_core.py', 'w', encoding='utf-8') as f:
-    f.write(kitchen_core_code)
-
-with open('main.py', 'w', encoding='utf-8') as f:
-    f.write(main_code)
-
-print("✅ Створено 3 файли:")
-print("📁 database.py - робота з Google Sheets")
-print("📁 kitchen_core.py - основна логіка кухні") 
-print("📁 main.py - Telegram бот")
-print("\n🚀 Готово до деплою!")
