@@ -1,4 +1,4 @@
-import os
+main_code = '''import os
 import json
 import logging
 import re
@@ -11,7 +11,11 @@ from google.oauth2.service_account import Credentials
 
 # Імпортуємо нові модулі
 from database import KitchenDatabase
-from kitchen_core import add_product, remove_product, list_products
+from kitchen_core import (
+    add_product, remove_product, list_products, find_product,
+    get_expiring_products, add_to_shopping_list, get_shopping_list,
+    remove_from_shopping_list, get_consumption_stats
+)
 
 # Налаштування логування
 logging.basicConfig(
@@ -27,55 +31,7 @@ CHATLLM_API_URL = "https://routellm.abacus.ai/v1/chat/completions"
 
 class KitchenBot:
     def __init__(self):
-        self.init_gsheets()
-        # Ініціалізуємо нову базу даних
         self.db = KitchenDatabase()
-    
-    def init_gsheets(self):
-        """Ініціалізація Google Sheets (старий код для сумісності)"""
-        try:
-            logger.info("🔄 Починаю ініціалізацію Google Sheets...")
-            
-            creds_env = os.environ.get("GOOGLE_CREDENTIALS")
-            if not creds_env:
-                logger.error("❌ Змінна GOOGLE_CREDENTIALS не знайдена в Railway!")
-                self.products_sheet = None
-                return
-            
-            logger.info("✅ GOOGLE_CREDENTIALS знайдено")
-            
-            service_account_info = json.loads(creds_env)
-            logger.info(f"✅ JSON розпарсено. Project ID: {service_account_info.get('project_id')}")
-            
-            creds = Credentials.from_service_account_info(
-                service_account_info,
-                scopes=[
-                    "https://www.googleapis.com/auth/spreadsheets",
-                    "https://www.googleapis.com/auth/drive"
-                ]
-            )
-            logger.info("✅ Креденшіали створено")
-            
-            client = gspread.authorize(creds)
-            logger.info("✅ Авторизація в gspread пройшла")
-            
-            logger.info("🔄 Намагаюсь відкрити таблицю 'kitchen_products'...")
-            self.products_sheet = client.open("kitchen_products").sheet1
-            logger.info("✅ Таблиця 'kitchen_products' відкрита успішно")
-            
-            if len(self.products_sheet.get_all_values()) == 0:
-                logger.info("🔄 Таблиця порожня, додаю заголовки...")
-                self.products_sheet.append_row([
-                    "user_id", "product_name", "quantity", "unit", "expiry_date", "added_date"
-                ])
-                logger.info("✅ Заголовки додано")
-            
-            logger.info("🎉 З'єднання з Google Sheets повністю успішне!")
-            
-        except Exception as e:
-            logger.error(f"❌ Детальна помилка з'єднання з Google Sheets: {e}")
-            logger.error(f"❌ Тип помилки: {type(e).__name__}")
-            self.products_sheet = None
     
     def call_chatllm_api(self, prompt, system_message=""):
         """Виклик ChatLLM API"""
@@ -103,37 +59,45 @@ class KitchenBot:
             logger.error(f"Помилка ChatLLM API: {e}")
             return None
     
-    def parse_action_and_product(self, message_text):
-        """Розпізнавання дії (додати/відняти) та продукту через ChatLLM"""
-        system_prompt = """
-        Ти - асистент для розпізнавання дій з продуктами харчування.
-        Твоє завдання - визначити, що хоче зробити користувач: додати чи відняти продукт.
+    def parse_user_intent(self, message_text, user_id):
+        """Розпізнавання наміру користувача через ChatLLM"""
+        # Отримуємо список продуктів для контексту
+        products = list_products(user_id)
+        products_context = ", ".join([p["product_name"] for p in products[:10]])  # перші 10
         
-        Формат відповіді (JSON):
-        {
-            "action": "add" або "remove",
-            "product_name": "назва продукту",
-            "quantity": число,
-            "unit": "одиниця виміру (кг, л, шт, г, мл)",
-            "confidence": 0.9
-        }
+        system_prompt = f"""
+        Ти - асистент для розпізнавання намірів користувача щодо кухонних продуктів.
+        
+        Контекст: у користувача є такі продукти: {products_context}
+        
+        Визнач намір і поверни JSON:
+        
+        1. ДОДАТИ продукт:
+        {{"action": "add", "product_name": "назва", "quantity": число, "unit": "одиниця", "confidence": 0.9}}
+        
+        2. ВІДНЯТИ/З'ЇСТИ продукт:
+        {{"action": "remove", "product_name": "назва", "quantity": число, "unit": "одиниця", "confidence": 0.9}}
+        
+        3. ЗАПИТАТИ про наявність:
+        {{"action": "query", "product_name": "назва", "confidence": 0.9}}
+        
+        4. ДОДАТИ до списку покупок:
+        {{"action": "shopping_add", "product_name": "назва", "quantity": число, "unit": "одиниця", "confidence": 0.9}}
+        
+        5. ЗАГАЛЬНА РОЗМОВА:
+        {{"action": "chat", "confidence": 0.5}}
 
-        Ключові слова для "remove" (відняти):
-        - з'їв, зїв, з'їла, зїла
-        - витратив, використав
-        - приготував з цього
-        - відняти, мінус
-
-        Ключові слова для "add" (додати):
-        - купив, додав, поклав
-        - привіз, отримав
-        - плюс, додати
-
+        Ключові слова:
+        - Додати: "купив", "додав", "поклав", "привіз", "отримав"
+        - Відняти: "з'їв", "зїв", "витратив", "використав", "приготував", "відняти"
+        - Запитати: "скільки", "чи є", "що у мене", "маю", "залишилось"
+        - Покупки: "треба купити", "додай до списку", "нагадай купити"
+        
         Приклади:
-        "я з'їв 250 грам сирників" -> {"action": "remove", "product_name": "сирники", "quantity": 250, "unit": "г", "confidence": 0.9}
-        "купив 1 літр молока" -> {"action": "add", "product_name": "молоко", "quantity": 1, "unit": "л", "confidence": 0.9}
-        
-        Якщо не можеш визначити дію, поверни: {"action": "unknown", "confidence": 0.0}
+        "купив 1л молока" → {{"action": "add", "product_name": "молоко", "quantity": 1, "unit": "л", "confidence": 0.9}}
+        "з'їв 250г сирників" → {{"action": "remove", "product_name": "сирники", "quantity": 250, "unit": "г", "confidence": 0.9}}
+        "скільки у мене картоплі?" → {{"action": "query", "product_name": "картопля", "confidence": 0.9}}
+        "треба купити хліб" → {{"action": "shopping_add", "product_name": "хліб", "quantity": 1, "unit": "шт", "confidence": 0.8}}
         """
         
         response = self.call_chatllm_api(message_text, system_prompt)
@@ -142,7 +106,7 @@ class KitchenBot:
                 return json.loads(response)
             except json.JSONDecodeError:
                 logger.error(f"Не вдалося розпарсити JSON: {response}")
-        return {"action": "unknown", "confidence": 0.0}
+        return {"action": "chat", "confidence": 0.0}
 
 # Ініціалізація бота
 kitchen_bot = KitchenBot()
@@ -152,125 +116,207 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = """
 🍳 Привіт! Я твій розумний кухонний асистент!
 
-Що я вмію:
-📦 Розумію твої повідомлення:
-   • "купив 1л молока" → додам до списку
-   • "з'їв 250г сирників" → відніму зі списку
-   • "що у мене є?" → покажу всі продукти
+🤖 Що я розумію:
+• "купив 1л молока" → додам до кухні
+• "з'їв 250г сирників" → відніму з кухні  
+• "скільки у мене картоплі?" → покажу наявність
+• "треба купити хліб" → додам до списку покупок
 
 📋 Команди:
-   • /products - показати всі продукти
-   • /remove 250 г сирників - відняти продукт
-   • /test_add - тест додавання
-   • /test_remove - тест віднімання
+• /products - всі продукти
+• /expiring - що скоро псується
+• /shopping - список покупок
+• /stats - статистика споживання
+• /remove 250 г сирників - точне віднімання
 
-🤖 Тепер я розумію, коли ти щось додаєш, а коли з'їдаєш!
+🎯 Просто пиши природною мовою!
     """
     await update.message.reply_text(welcome_message)
 
-# --- /remove: ручне віднімання без AI ---
-REMOVE_RX = re.compile(r"^/remove\s+(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+)$", re.IGNORECASE)
+# Регулярні вирази для швидкого парсингу
+REMOVE_RX = re.compile(r"^/remove\\s+(?P<qty>[\\d.,]+)\\s*(?P<unit>г|гр|кг|мл|л|шт)\\s+(?P<name>.+)$", re.IGNORECASE)
+QUICK_REMOVE_RX = re.compile(r"(?P<qty>[\\d.,]+)\\s*(?P<unit>г|гр|кг|мл|л|шт)\\s+(?P<name>.+?)(?:\\s|$)", re.IGNORECASE)
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /remove для ручного віднімання продуктів"""
+    """Команда /remove для точного віднімання"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     m = REMOVE_RX.match(text)
     if not m:
         await update.message.reply_text("Формат: /remove 250 г сирників")
         return
+    
     qty = float(m.group("qty").replace(",", "."))
-    unit = m.group("unit").lower()
+    unit = m.group("unit")
     name = m.group("name").strip()
-    # нормалізація одиниць
-    unit = "г" if unit in ["г", "гр"] else unit
+    
     result = remove_product(user_id, name, qty, unit)
     await update.message.reply_text(result)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробка звичайних повідомлень з новою логікою"""
+    """Головна обробка повідомлень"""
     user_id = update.effective_user.id
     message_text = update.message.text
     
-    # Швидка перевірка на споживання без AI
+    # Швидкий парсинг для віднімання
     low = message_text.lower()
-    if any(kw in low for kw in ["з'їв", "зїв", "з'їв", "з'їла", "відніми", "відняти", "мінус", "використав", "витратив"]):
-        # Проста евристика: спробувати витягти кількість+одиницю+назву
-        m = re.search(r"(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+?)(?:\s|$)", low, re.IGNORECASE)
+    if any(kw in low for kw in ["з'їв", "зїв", "відніми", "відняти", "мінус", "використав", "витратив"]):
+        m = QUICK_REMOVE_RX.search(low)
         if m:
             qty = float(m.group("qty").replace(",", "."))
-            unit = m.group("unit").lower()
-            unit = "г" if unit in ["г", "гр"] else unit
+            unit = m.group("unit")
             name = m.group("name").strip()
             result = remove_product(user_id, name, qty, unit)
             await update.message.reply_text(result)
             return
     
+    # AI розпізнавання наміру
     await update.message.reply_text("🤔 Аналізую твоє повідомлення...")
+    intent = kitchen_bot.parse_user_intent(message_text, user_id)
     
-    # Використовуємо нову функцію розпізнавання дій
-    action_data = kitchen_bot.parse_action_and_product(message_text)
-    
-    if action_data["action"] == "add":
+    if intent["action"] == "add":
         result = add_product(
             user_id, 
-            action_data["product_name"], 
-            action_data["quantity"], 
-            action_data["unit"]
+            intent["product_name"], 
+            intent["quantity"], 
+            intent["unit"]
         )
         await update.message.reply_text(result)
         
-    elif action_data["action"] == "remove":
+    elif intent["action"] == "remove":
         result = remove_product(
             user_id, 
-            action_data["product_name"], 
-            action_data["quantity"], 
-            action_data["unit"]
+            intent["product_name"], 
+            intent["quantity"], 
+            intent["unit"]
+        )
+        await update.message.reply_text(result)
+        
+    elif intent["action"] == "query":
+        found_products = find_product(user_id, intent["product_name"])
+        if found_products:
+            response = f"🔍 Знайшов {intent['product_name']}:\\n\\n"
+            for product in found_products:
+                response += f"• {product['quantity']}{product['unit']} {product['product_name']}\\n"
+        else:
+            response = f"❌ У тебе немає {intent['product_name']}"
+        await update.message.reply_text(response)
+        
+    elif intent["action"] == "shopping_add":
+        result = add_to_shopping_list(
+            user_id,
+            intent["product_name"],
+            intent.get("quantity", 1),
+            intent.get("unit", "шт")
         )
         await update.message.reply_text(result)
         
     else:
-        # Якщо не зрозуміли дію - загальна відповідь
+        # Загальна розмова
         system_prompt = """
-        Ти - дружній кухонний асистент. Користувач написав повідомлення, але я не зрозумів, що він хоче зробити.
-        Відповідай коротко і дружньо, пропонуй допомогу з кухонними справами.
-        Пиши українською мовою.
+        Ти - дружній кухонний асистент. Відповідай коротко і корисно.
+        Пропонуй допомогу з кухонними справами. Пиши українською.
         """
-        
         ai_response = kitchen_bot.call_chatllm_api(message_text, system_prompt)
-        response = ai_response if ai_response else "Вибач, не зрозумів. Спробуй написати 'купив молоко' або 'з'їв хліб'."
+        response = ai_response if ai_response else "Вибач, не зрозумів. Спробуй написати про продукти!"
         await update.message.reply_text(response)
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /products - показати продукти через нові функції"""
+    """Команда /products"""
     user_id = update.effective_user.id
     products = list_products(user_id)
     
     if not products:
-        await update.message.reply_text("📦 Твоя кухня порожня! Додай продукти, написавши про них.")
+        await update.message.reply_text("📦 Твоя кухня порожня! Додай продукти.")
         return
     
-    response = "📦 Твої продукти:\n\n"
+    # Групуємо по категоріях
+    categories = {"Звичайні": [], "Морозилка": [], "Готова їжа": []}
+    
     for product in products:
-        expiry_info = ""
-        if product.get('expiry_date'):
-            expiry_info = f" (до {product['expiry_date']})"
-        
-        response += f"• {product['quantity']}{product['unit']} {product['product_name']}{expiry_info}\n"
+        name = product["product_name"]
+        if "[МОРОЗИЛКА]" in name:
+            categories["Морозилка"].append(product)
+        elif "[ГОТОВА_ЇЖА]" in name or "[МОРОЗИЛКА_ГОТОВА]" in name:
+            categories["Готова їжа"].append(product)
+        else:
+            categories["Звичайні"].append(product)
+    
+    response = "📦 Твої продукти:\\n\\n"
+    for cat_name, items in categories.items():
+        if items:
+            response += f"**{cat_name}:**\\n"
+            for product in items:
+                clean_name = product["product_name"].replace("[МОРОЗИЛКА]", "").replace("[ГОТОВА_ЇЖА]", "").replace("[МОРОЗИЛКА_ГОТОВА]", "").strip()
+                expiry_info = f" (до {product['expiry_date']})" if product.get('expiry_date') else ""
+                response += f"• {product['quantity']}{product['unit']} {clean_name}{expiry_info}\\n"
+            response += "\\n"
     
     await update.message.reply_text(response)
 
-async def test_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тестова команда для додавання"""
+async def show_expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /expiring"""
     user_id = update.effective_user.id
-    result = add_product(user_id, "тестовий продукт", 100, "г")
-    await update.message.reply_text(f"🧪 Тест додавання:\n{result}")
+    expiring = get_expiring_products(user_id, days=3)
+    
+    if not expiring:
+        await update.message.reply_text("✅ Немає продуктів, що скоро псуються!")
+        return
+    
+    response = "⚠️ Продукти, що скоро псуються:\\n\\n"
+    for product in expiring:
+        days_left = product["days_left"]
+        if days_left < 0:
+            status = "❌ ПРОСТРОЧЕНО"
+        elif days_left == 0:
+            status = "🔥 СЬОГОДНІ"
+        elif days_left == 1:
+            status = "⚡ ЗАВТРА"
+        else:
+            status = f"📅 {days_left} днів"
+        
+        clean_name = product["product_name"].replace("[МОРОЗИЛКА]", "").replace("[ГОТОВА_ЇЖА]", "").strip()
+        response += f"• {product['quantity']}{product['unit']} {clean_name} - {status}\\n"
+    
+    await update.message.reply_text(response)
 
-async def test_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тестова команда для віднімання"""
+async def show_shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /shopping"""
     user_id = update.effective_user.id
-    result = remove_product(user_id, "тестовий продукт", 50, "г")
-    await update.message.reply_text(f"🧪 Тест віднімання:\n{result}")
+    shopping = get_shopping_list(user_id)
+    
+    if not shopping:
+        await update.message.reply_text("📝 Список покупок порожній!")
+        return
+    
+    response = "🛒 Список покупок:\\n\\n"
+    for item in shopping:
+        response += f"• {item['quantity']}{item['unit']} {item['item']}\\n"
+    
+    await update.message.reply_text(response)
+
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /stats"""
+    user_id = update.effective_user.id
+    stats = get_consumption_stats(user_id, days=7)
+    
+    response = "📊 Статистика за тиждень:\\n\\n"
+    
+    if stats["consumed"]:
+        response += "🍽️ **Спожито:**\\n"
+        for item in stats["consumed"][:5]:  # топ 5
+            response += f"• {item['quantity']}г/мл {item['product']}\\n"
+        response += "\\n"
+    
+    if stats["added"]:
+        response += "📦 **Додано:**\\n"
+        for item in stats["added"][:5]:  # топ 5
+            response += f"• {item['quantity']}г/мл {item['product']}\\n"
+    
+    if not stats["consumed"] and not stats["added"]:
+        response += "Поки що немає активності 🤷‍♂️"
+    
+    await update.message.reply_text(response)
 
 def main():
     """Запуск бота"""
@@ -288,15 +334,36 @@ def main():
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
+    # Реєструємо команди
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("products", show_products))
+    application.add_handler(CommandHandler("expiring", show_expiring))
+    application.add_handler(CommandHandler("shopping", show_shopping))
+    application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CommandHandler("remove", cmd_remove))
-    application.add_handler(CommandHandler("test_add", test_add))
-    application.add_handler(CommandHandler("test_remove", test_remove))
+    
+    # Обробка повідомлень (має бути останньою)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("🤖 Розумний кухонний бот запущено з новими функціями!")
+    logger.info("🤖 Розумний кухонний бот запущено з повним функціоналом!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
+'''
+
+# Записуємо файли
+with open('database.py', 'w', encoding='utf-8') as f:
+    f.write(database_code)
+
+with open('kitchen_core.py', 'w', encoding='utf-8') as f:
+    f.write(kitchen_core_code)
+
+with open('main.py', 'w', encoding='utf-8') as f:
+    f.write(main_code)
+
+print("✅ Створено 3 файли:")
+print("📁 database.py - робота з Google Sheets")
+print("📁 kitchen_core.py - основна логіка кухні") 
+print("📁 main.py - Telegram бот")
+print("\n🚀 Готово до деплою!")
