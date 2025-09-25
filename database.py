@@ -1,4 +1,4 @@
-import gspread
+database_code = '''import gspread
 import os
 import json
 from datetime import datetime
@@ -29,7 +29,6 @@ class KitchenDatabase:
         )
 
         client = gspread.authorize(creds)
-        # ВАЖЛИВО: відкриваємо книгу, а не sheet1
         self.sh = client.open("kitchen_products")
 
         # Гарантуємо наявність і заголовки
@@ -44,13 +43,13 @@ class KitchenDatabase:
             ws = self.sh.add_worksheet(title=title, rows=1000, cols=max(len(headers), 8))
             ws.append_row(headers)
             return
+        
         # Перевіряємо заголовки і виправляємо при потребі
         values = ws.get_all_values()
         if not values:
             ws.append_row(headers)
         else:
             current = [h.strip() for h in values[0]] if values else []
-            # якщо заголовки не збігаються — переписуємо перший рядок
             if [h.lower() for h in current] != [h.lower() for h in headers]:
                 ws.delete_rows(1)
                 ws.insert_row(headers, 1)
@@ -67,4 +66,5 @@ class KitchenDatabase:
     def log_action(self, user_id, product_name, delta_qty, unit, action):
         logs = self.get_logs_sheet()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logs.append_row([user_id, product_name, delta_qty, unit, action, timestamp])
+        logs.append_row([str(user_id), product_name, delta_qty, unit, action, timestamp])
+'''
