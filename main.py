@@ -1,21 +1,10 @@
 import os
-import json
 import logging
-import re
-from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import requests
-import gspread
-from google.oauth2.service_account import Credentials
-
-# Імпортуємо нові модулі
-from database import KitchenDatabase
-from kitchen_core import (
-    add_product, remove_product, list_products, find_product,
-    get_expiring_products, add_to_shopping_list, get_shopping_list,
-    remove_from_shopping_list, get_consumption_stats
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from database import Database
+from nlp_processor import NLPProcessor
+from recipe_manager import RecipeManager
 
 # Налаштування логування
 logging.basicConfig(
@@ -24,328 +13,420 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфігурація
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHATLLM_API_KEY = os.getenv('CHATLLM_API_KEY')
-CHATLLM_API_URL = "https://routellm.abacus.ai/v1/chat/completions"
-
 class KitchenBot:
     def __init__(self):
-        self.db = KitchenDatabase()
-    
-    def call_chatllm_api(self, prompt, system_message=""):
-        """Виклик ChatLLM API"""
-        headers = {
-            'Authorization': f'Bearer {CHATLLM_API_KEY}',
-            'Content-Type': 'application/json'
-        }
+        self.db = Database()
+        self.nlp = NLPProcessor()
+        self.recipe_manager = RecipeManager(self.db)
         
-        messages = []
-        if system_message:
-            messages.append({"role": "system", "content": system_message})
-        messages.append({"role": "user", "content": prompt})
-        
-        data = {
-            "model": "gpt-4o-mini",
-            "messages": messages,
-            "temperature": 0.3
-        }
-        
-        try:
-            response = requests.post(CHATLLM_API_URL, headers=headers, json=data)
-            response.raise_for_status()
-            return response.json()['choices'][0]['message']['content']
-        except Exception as e:
-            logger.error(f"Помилка ChatLLM API: {e}")
-            return None
-    
-    def parse_user_intent(self, message_text, user_id):
-        """Розпізнавання наміру користувача через ChatLLM"""
-        # Отримуємо список продуктів для контексту
-        products = list_products(user_id)
-        products_context = ", ".join([p["product_name"] for p in products[:10]])  # перші 10
-        
-        system_prompt = f"""
-        Ти - асистент для розпізнавання намірів користувача щодо кухонних продуктів.
-        
-        Контекст: у користувача є такі продукти: {products_context}
-        
-        Визнач намір і поверни JSON:
-        
-        1. ДОДАТИ продукт:
-        {{"action": "add", "product_name": "назва", "quantity": число, "unit": "одиниця", "confidence": 0.9}}
-        
-        2. ВІДНЯТИ/З'ЇСТИ продукт:
-        {{"action": "remove", "product_name": "назва", "quantity": число, "unit": "одиниця", "confidence": 0.9}}
-        
-        3. ЗАПИТАТИ про наявність:
-        {{"action": "query", "product_name": "назва", "confidence": 0.9}}
-        
-        4. ДОДАТИ до списку покупок:
-        {{"action": "shopping_add", "product_name": "назва", "quantity": число, "unit": "одиниця", "confidence": 0.9}}
-        
-        5. ЗАГАЛЬНА РОЗМОВА:
-        {{"action": "chat", "confidence": 0.5}}
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /start"""
+        welcome_message = """
+🍳 **Привіт! Я твій кухонний помічник!**
 
-        Ключові слова:
-        - Додати: "купив", "додав", "поклав", "привіз", "отримав"
-        - Відняти: "з'їв", "зїв", "витратив", "використав", "приготував", "відняти"
-        - Запитати: "скільки", "чи є", "що у мене", "маю", "залишилось"
-        - Покупки: "треба купити", "додай до списку", "нагадай купити"
-        
-        Приклади:
-        "купив 1л молока" → {{"action": "add", "product_name": "молоко", "quantity": 1, "unit": "л", "confidence": 0.9}}
-        "з'їв 250г сирників" → {{"action": "remove", "product_name": "сирники", "quantity": 250, "unit": "г", "confidence": 0.9}}
-        "скільки у мене картоплі?" → {{"action": "query", "product_name": "картопля", "confidence": 0.9}}
-        "треба купити хліб" → {{"action": "shopping_add", "product_name": "хліб", "quantity": 1, "unit": "шт", "confidence": 0.8}}
+Я розумію звичайну мову, тому можеш писати мені як другу:
+
+🔍 **Рецепти:**
+• "дай рецепт борщу"
+• "борщ на 6 порцій"
+• "що приготувати з курки?"
+• "випадковий рецепт"
+
+🛒 **Продукти:**
+• "мої запаси"
+• "додай молоко 2 літри"
+• "що є в холодильнику?"
+
+🔄 **Заміни:**
+• "чим замінити молоко?"
+• "немає цукру, що робити?"
+
+📊 **Харчування:**
+• "калорії борщу"
+• "поживність м'яса"
+
+💡 **Поради:**
+• "поради для борщу"
+• "як краще готувати?"
+
+Просто пиши мені природною мовою! 😊
         """
         
-        response = self.call_chatllm_api(message_text, system_prompt)
-        if response:
-            try:
-                return json.loads(response)
-            except json.JSONDecodeError:
-                logger.error(f"Не вдалося розпарсити JSON: {response}")
-        return {"action": "chat", "confidence": 0.0}
-
-# Ініціалізація бота
-kitchen_bot = KitchenBot()
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
-    welcome_message = """
-🍳 Привіт! Я твій розумний кухонний асистент!
-
-🤖 Що я розумію:
-• "купив 1л молока" → додам до кухні
-• "з'їв 250г сирників" → відніму з кухні  
-• "скільки у мене картоплі?" → покажу наявність
-• "треба купити хліб" → додам до списку покупок
-
-📋 Команди:
-• /products - всі продукти
-• /expiring - що скоро псується
-• /shopping - список покупок
-• /stats - статистика споживання
-• /remove 250 г сирників - точне віднімання
-
-🎯 Просто пиши природною мовою!
-    """
-    await update.message.reply_text(welcome_message)
-
-# Регулярні вирази для швидкого парсингу
-REMOVE_RX = re.compile(r"^/remove\s+(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+)$", re.IGNORECASE)
-QUICK_REMOVE_RX = re.compile(r"(?P<qty>[\d.,]+)\s*(?P<unit>г|гр|кг|мл|л|шт)\s+(?P<name>.+?)(?:\s|$)", re.IGNORECASE)
-
-async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /remove для точного віднімання"""
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    m = REMOVE_RX.match(text)
-    if not m:
-        await update.message.reply_text("Формат: /remove 250 г сирників")
-        return
-    
-    qty = float(m.group("qty").replace(",", "."))
-    unit = m.group("unit")
-    name = m.group("name").strip()
-    
-    result = remove_product(user_id, name, qty, unit)
-    await update.message.reply_text(result)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Головна обробка повідомлень"""
-    user_id = update.effective_user.id
-    message_text = update.message.text
-    
-    # Швидкий парсинг для віднімання
-    low = message_text.lower()
-    if any(kw in low for kw in ["з'їв", "зїв", "відніми", "відняти", "мінус", "використав", "витратив"]):
-        m = QUICK_REMOVE_RX.search(low)
-        if m:
-            qty = float(m.group("qty").replace(",", "."))
-            unit = m.group("unit")
-            name = m.group("name").strip()
-            result = remove_product(user_id, name, qty, unit)
-            await update.message.reply_text(result)
-            return
-    
-    # AI розпізнавання наміру
-    await update.message.reply_text("🤔 Аналізую твоє повідомлення...")
-    intent = kitchen_bot.parse_user_intent(message_text, user_id)
-    
-    if intent["action"] == "add":
-        result = add_product(
-            user_id, 
-            intent["product_name"], 
-            intent["quantity"], 
-            intent["unit"]
-        )
-        await update.message.reply_text(result)
+        # Кнопки швидкого доступу
+        keyboard = [
+            [InlineKeyboardButton("🍲 Випадковий рецепт", callback_data="random_recipe")],
+            [InlineKeyboardButton("🛒 Мої запаси", callback_data="my_inventory")],
+            [InlineKeyboardButton("📚 Всі рецепти", callback_data="all_recipes")],
+            [InlineKeyboardButton("💡 Що приготувати?", callback_data="cooking_suggestions")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-    elif intent["action"] == "remove":
-        result = remove_product(
-            user_id, 
-            intent["product_name"], 
-            intent["quantity"], 
-            intent["unit"]
-        )
-        await update.message.reply_text(result)
+        await update.message.reply_text(welcome_message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробка звичайних повідомлень"""
+        user_message = update.message.text
         
-    elif intent["action"] == "query":
-        found_products = find_product(user_id, intent["product_name"])
-        if found_products:
-            response = f"🔍 Знайшов {intent['product_name']}:\n\n"
-            for product in found_products:
-                response += f"• {product['quantity']}{product['unit']} {product['product_name']}\n"
+        # Обробляємо повідомлення через NLP
+        processed = self.nlp.process_message(user_message)
+        intent = processed['intent']
+        params = processed['parameters']
+        
+        # Показуємо що зрозуміли
+        response_template = self.nlp.generate_response_template(intent, params)
+        await update.message.reply_text(response_template)
+        
+        # Обробляємо за типом запиту
+        if intent == 'recipe':
+            await self.handle_recipe_request(update, params)
+        elif intent == 'substitution':
+            await self.handle_substitution_request(update, params)
+        elif intent == 'nutrition':
+            await self.handle_nutrition_request(update, params)
+        elif intent == 'inventory':
+            await self.handle_inventory_request(update)
+        elif intent == 'meal_plan':
+            await self.handle_meal_plan_request(update)
         else:
-            response = f"❌ У тебе немає {intent['product_name']}"
-        await update.message.reply_text(response)
+            await self.handle_unknown_request(update, user_message)
+    
+    async def handle_recipe_request(self, update: Update, params: dict):
+        """Обробка запитів рецептів"""
+        dish = params.get('dish')
+        servings = params.get('servings')
+        category = params.get('category')
+        difficulty = params.get('difficulty')
         
-    elif intent["action"] == "shopping_add":
-        result = add_to_shopping_list(
-            user_id,
-            intent["product_name"],
-            intent.get("quantity", 1),
-            intent.get("unit", "шт")
+        if dish:
+            # Шукаємо конкретну страву
+            recipe = self.recipe_manager.get_recipe_by_name(dish, servings)
+            if recipe:
+                message = self.recipe_manager.format_recipe_message(recipe)
+                
+                # Додаємо кнопки для додаткових дій
+                keyboard = [
+                    [InlineKeyboardButton("🔍 Перевірити інгредієнти", callback_data=f"check_ingredients_{recipe['id']}")],
+                    [InlineKeyboardButton("💡 Поради", callback_data=f"cooking_tips_{recipe['id']}")],
+                    [InlineKeyboardButton("🛒 Список покупок", callback_data=f"shopping_list_{recipe['id']}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+            else:
+                # Пропонуємо схожі рецепти
+                similar_recipes = self.recipe_manager.find_recipes(dish)
+                if similar_recipes:
+                    message = self.recipe_manager.format_recipe_list(similar_recipes, f"Схожі рецепти на '{dish}'")
+                    await update.message.reply_text(message, parse_mode='Markdown')
+                else:
+                    await update.message.reply_text(f"❌ Рецепт '{dish}' не знайдено. Спробуй інші варіанти:")
+                    await self.send_recipe_suggestions(update)
+        else:
+            # Випадковий рецепт з фільтрами
+            recipe = self.recipe_manager.get_random_recipe(category, difficulty)
+            if recipe:
+                message = "🎲 **Випадковий рецепт для тебе:**\n\n"
+                message += self.recipe_manager.format_recipe_message(recipe)
+                await update.message.reply_text(message, parse_mode='Markdown')
+            else:
+                await update.message.reply_text("❌ Не знайшов підходящих рецептів")
+    
+    async def handle_substitution_request(self, update: Update, params: dict):
+        """Обробка запитів замін"""
+        ingredient = params.get('ingredient')
+        
+        if ingredient:
+            substitutions = self.db.get_substitutions(ingredient)
+            if substitutions:
+                message = f"🔄 **Чим можна замінити {ingredient}:**\n\n"
+                for i, (substitute, ratio, notes) in enumerate(substitutions, 1):
+                    message += f"{i}. **{substitute}**"
+                    if ratio != 1.0:
+                        message += f" (коефіцієнт {ratio})"
+                    message += "\n"
+                    if notes:
+                        message += f"   💡 {notes}\n"
+                    message += "\n"
+            else:
+                message = f"❌ Не знайшов замін для '{ingredient}'\n\n"
+                message += "💡 Спробуй написати інакше або запитай про інший інгредієнт"
+        else:
+            message = "❓ Не зрозумів який інгредієнт потрібно замінити. Спробуй написати: 'чим замінити молоко?'"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    
+    async def handle_nutrition_request(self, update: Update, params: dict):
+        """Обробка запитів харчової цінності"""
+        item = params.get('item')
+        
+        if item:
+            # Тут можна додати логіку для отримання харчової цінності
+            message = f"📊 **Харчова цінність {item} (на 100г):**\n\n"
+            message += "⚠️ Функція в розробці. Скоро буде доступна!"
+        else:
+            message = "❓ Не зрозумів для якого продукту показати харчову цінність"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    
+    async def handle_inventory_request(self, update: Update):
+        """Обробка запитів запасів"""
+        products = self.db.get_products()
+        
+        if products:
+            message = "🛒 **Твої запаси:**\n\n"
+            
+            # Групуємо за категоріями
+            categories = {}
+            for product in products:
+                category = product[5] or 'інше'
+                if category not in categories:
+                    categories[category] = []
+                categories[category].append(product)
+            
+            # Емодзі для категорій
+            category_emoji = {
+                'м\'ясо': '🥩',
+                'овочі': '🥕',
+                'фрукти': '🍎',
+                'молочні': '🥛',
+                'крупи': '🌾',
+                'інше': '📦'
+            }
+            
+            for category, items in categories.items():
+                emoji = category_emoji.get(category, '📦')
+                message += f"{emoji} **{category.title()}:**\n"
+                
+                for product in items:
+                    name, quantity, unit = product[1], product[2], product[3]
+                    if quantity > 0:
+                        message += f"• {name} - {quantity} {unit}\n"
+                    else:
+                        message += f"• {name} - ❌ закінчилось\n"
+                message += "\n"
+            
+            # Кнопки для управління
+            keyboard = [
+                [InlineKeyboardButton("➕ Додати продукт", callback_data="add_product")],
+                [InlineKeyboardButton("📝 Редагувати", callback_data="edit_inventory")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+        else:
+            message = "📦 **Твої запаси порожні**\n\nДодай продукти командою: 'додай молоко 2 літри'"
+            keyboard = [
+                [InlineKeyboardButton("➕ Додати перший продукт", callback_data="add_product")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def handle_meal_plan_request(self, update: Update):
+        """Обробка запитів планування харчування"""
+        message = "📅 **Планування харчування**\n\n"
+        message += "⚠️ Функція в розробці. Скоро буде доступна!\n\n"
+        message += "Поки що можеш:\n"
+        message += "• Отримати випадковий рецепт\n"
+        message += "• Переглянути всі рецепти\n"
+        message += "• Перевірити свої запаси"
+        
+        keyboard = [
+            [InlineKeyboardButton("🎲 Випадковий рецепт", callback_data="random_recipe")],
+            [InlineKeyboardButton("📚 Всі рецепти", callback_data="all_recipes")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def handle_unknown_request(self, update: Update, user_message: str):
+        """Обробка незрозумілих запитів"""
+        suggestions = self.nlp.get_suggestions(user_message)
+        
+        message = "🤔 **Не зовсім зрозумів що ти хочеш**\n\n"
+        message += "Можливо, ти мав на увазі:\n"
+        
+        keyboard = []
+        for suggestion in suggestions:
+            keyboard.append([InlineKeyboardButton(f"💡 {suggestion}", callback_data=f"suggest_{suggestion}")])
+        
+        keyboard.append([InlineKeyboardButton("❓ Показати приклади", callback_data="show_examples")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробка натискань кнопок"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        
+        if data == "random_recipe":
+            recipe = self.recipe_manager.get_random_recipe()
+            if recipe:
+                message = "🎲 **Випадковий рецепт:**\n\n"
+                message += self.recipe_manager.format_recipe_message(recipe)
+                await query.edit_message_text(message, parse_mode='Markdown')
+        
+        elif data == "my_inventory":
+            await self.handle_inventory_request_callback(query)
+        
+        elif data == "all_recipes":
+            recipes = self.recipe_manager.find_recipes("")
+            message = self.recipe_manager.format_recipe_list(recipes, "Всі доступні рецепти")
+            await query.edit_message_text(message, parse_mode='Markdown')
+        
+        elif data == "cooking_suggestions":
+            await self.send_cooking_suggestions(query)
+        
+        elif data.startswith("check_ingredients_"):
+            recipe_id = int(data.split("_")[2])
+            recipe = self.db.get_recipe_by_id(recipe_id)
+            if recipe:
+                recipe_dict = {
+                    'id': recipe[0], 'name': recipe[1], 'description': recipe[2],
+                    'instructions': recipe[3], 'prep_time': recipe[4], 'cook_time': recipe[5],
+                    'servings': recipe[6], 'difficulty': recipe[7], 'category': recipe[8]
+                }
+                ingredients = self.db.get_recipe_ingredients(recipe_id)
+                recipe_dict['ingredients'] = [
+                    {'name': ing[0], 'quantity': ing[1], 'unit': ing[2]} 
+                    for ing in ingredients
+                ]
+                message = self.recipe_manager.format_ingredient_check(recipe_dict)
+                await query.edit_message_text(message, parse_mode='Markdown')
+        
+        elif data.startswith("cooking_tips_"):
+            recipe_id = int(data.split("_")[2])
+            recipe = self.db.get_recipe_by_id(recipe_id)
+            if recipe:
+                recipe_dict = {
+                    'name': recipe[1], 'difficulty': recipe[7], 'category': recipe[8],
+                    'prep_time': recipe[4], 'cook_time': recipe[5]
+                }
+                message = self.recipe_manager.get_cooking_tips(recipe_dict)
+                await query.edit_message_text(message, parse_mode='Markdown')
+        
+        elif data == "show_examples":
+            await self.send_examples(query)
+        
+        elif data.startswith("suggest_"):
+            suggestion = data[8:]  # Прибираємо "suggest_"
+            # Обробляємо пропозицію як звичайне повідомлення
+            processed = self.nlp.process_message(suggestion)
+            # Тут можна додати логіку обробки пропозиції
+            await query.edit_message_text(f"Обробляю: {suggestion}")
+    
+    async def handle_inventory_request_callback(self, query):
+        """Обробка запиту запасів через callback"""
+        products = self.db.get_products()
+        
+        if products:
+            message = "🛒 **Твої запаси:**\n\n"
+            for product in products[:10]:  # Показуємо перші 10
+                name, quantity, unit = product[1], product[2], product[3]
+                if quantity > 0:
+                    message += f"• {name} - {quantity} {unit}\n"
+                else:
+                    message += f"• {name} - ❌ закінчилось\n"
+            
+            if len(products) > 10:
+                message += f"\n... та ще {len(products) - 10} продуктів"
+        else:
+            message = "📦 Твої запаси порожні"
+        
+        await query.edit_message_text(message, parse_mode='Markdown')
+    
+    async def send_recipe_suggestions(self, update: Update):
+        """Відправляє пропозиції рецептів"""
+        keyboard = [
+            [InlineKeyboardButton("🍲 Борщ", callback_data="suggest_рецепт борщу")],
+            [InlineKeyboardButton("🥟 Вареники", callback_data="suggest_рецепт вареників")],
+            [InlineKeyboardButton("🥗 Салат", callback_data="suggest_рецепт салату")],
+            [InlineKeyboardButton("🎲 Випадковий", callback_data="random_recipe")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "💡 **Популярні рецепти:**", 
+            reply_markup=reply_markup, 
+            parse_mode='Markdown'
         )
-        await update.message.reply_text(result)
+    
+    async def send_cooking_suggestions(self, query):
+        """Відправляє пропозиції що приготувати"""
+        message = "🍳 **Що можна приготувати:**\n\n"
+        message += "🎲 Випадковий рецепт - сюрприз для тебе\n"
+        message += "🍲 Перші страви - супи, борщі\n"
+        message += "🍖 Основні страви - м'ясо, гарніри\n"
+        message += "🥗 Салати - легкі та свіжі\n"
+        message += "🍰 Десерти - солодощі\n\n"
+        message += "Просто напиши що хочеш!"
         
-    else:
-        # Загальна розмова
-        system_prompt = """
-        Ти - дружній кухонний асистент. Відповідай коротко і корисно.
-        Пропонуй допомогу з кухонними справами. Пиши українською.
+        await query.edit_message_text(message, parse_mode='Markdown')
+    
+    async def send_examples(self, query):
+        """Відправляє приклади команд"""
+        message = """
+💡 **Приклади команд:**
+
+🔍 **Рецепти:**
+• "рецепт борщу"
+• "борщ на 8 порцій"
+• "що приготувати з курки"
+• "випадковий рецепт"
+
+🛒 **Продукти:**
+• "мої запаси"
+• "що є вдома"
+• "додай молоко 2 літри"
+
+🔄 **Заміни:**
+• "чим замінити молоко"
+• "немає цукру"
+
+📊 **Харчування:**
+• "калорії борщу"
+• "поживність м'яса"
+
+Пиши природною мовою! 😊
         """
-        ai_response = kitchen_bot.call_chatllm_api(message_text, system_prompt)
-        response = ai_response if ai_response else "Вибач, не зрозумів. Спробуй написати про продукти!"
-        await update.message.reply_text(response)
-
-async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /products"""
-    user_id = update.effective_user.id
-    products = list_products(user_id)
-    
-    if not products:
-        await update.message.reply_text("📦 Твоя кухня порожня! Додай продукти.")
-        return
-    
-    # Групуємо по категоріях
-    categories = {"Звичайні": [], "Морозилка": [], "Готова їжа": []}
-    
-    for product in products:
-        name = product["product_name"]
-        if "[МОРОЗИЛКА]" in name:
-            categories["Морозилка"].append(product)
-        elif "[ГОТОВА_ЇЖА]" in name or "[МОРОЗИЛКА_ГОТОВА]" in name:
-            categories["Готова їжа"].append(product)
-        else:
-            categories["Звичайні"].append(product)
-    
-    response = "📦 Твої продукти:\n\n"
-    for cat_name, items in categories.items():
-        if items:
-            response += f"**{cat_name}:**\n"
-            for product in items:
-                clean_name = product["product_name"].replace("[МОРОЗИЛКА]", "").replace("[ГОТОВА_ЇЖА]", "").replace("[МОРОЗИЛКА_ГОТОВА]", "").strip()
-                expiry_info = f" (до {product['expiry_date']})" if product.get('expiry_date') else ""
-                response += f"• {product['quantity']}{product['unit']} {clean_name}{expiry_info}\n"
-            response += "\n"
-    
-    await update.message.reply_text(response)
-
-async def show_expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /expiring"""
-    user_id = update.effective_user.id
-    expiring = get_expiring_products(user_id, days=3)
-    
-    if not expiring:
-        await update.message.reply_text("✅ Немає продуктів, що скоро псуються!")
-        return
-    
-    response = "⚠️ Продукти, що скоро псуються:\n\n"
-    for product in expiring:
-        days_left = product["days_left"]
-        if days_left < 0:
-            status = "❌ ПРОСТРОЧЕНО"
-        elif days_left == 0:
-            status = "🔥 СЬОГОДНІ"
-        elif days_left == 1:
-            status = "⚡ ЗАВТРА"
-        else:
-            status = f"📅 {days_left} днів"
         
-        clean_name = product["product_name"].replace("[МОРОЗИЛКА]", "").replace("[ГОТОВА_ЇЖА]", "").strip()
-        response += f"• {product['quantity']}{product['unit']} {clean_name} - {status}\n"
+        await query.edit_message_text(message, parse_mode='Markdown')
     
-    await update.message.reply_text(response)
-
-async def show_shopping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /shopping"""
-    user_id = update.effective_user.id
-    shopping = get_shopping_list(user_id)
-    
-    if not shopping:
-        await update.message.reply_text("📝 Список покупок порожній!")
-        return
-    
-    response = "🛒 Список покупок:\n\n"
-    for item in shopping:
-        response += f"• {item['quantity']}{item['unit']} {item['item']}\n"
-    
-    await update.message.reply_text(response)
-
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /stats"""
-    user_id = update.effective_user.id
-    stats = get_consumption_stats(user_id, days=7)
-    
-    response = "📊 Статистика за тиждень:\n\n"
-    
-    if stats["consumed"]:
-        response += "🍽️ **Спожито:**\n"
-        for item in stats["consumed"][:5]:  # топ 5
-            response += f"• {item['quantity']}г/мл {item['product']}\n"
-        response += "\n"
-    
-    if stats["added"]:
-        response += "📦 **Додано:**\n"
-        for item in stats["added"][:5]:  # топ 5
-            response += f"• {item['quantity']}г/мл {item['product']}\n"
-    
-    if not stats["consumed"] and not stats["added"]:
-        response += "Поки що немає активності 🤷‍♂️"
-    
-    await update.message.reply_text(response)
+    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробка помилок"""
+        logger.error(f"Update {update} caused error {context.error}")
+        
+        if update and update.message:
+            await update.message.reply_text(
+                "😅 Щось пішло не так. Спробуй ще раз або напиши /start"
+            )
 
 def main():
     """Запуск бота"""
-    if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN не встановлено!")
+    # Отримуємо токен з змінних середовища
+    TOKEN = os.getenv('BOT_TOKEN')
+    if not TOKEN:
+        print("❌ Помилка: Не знайдено BOT_TOKEN в змінних середовища")
         return
     
-    if not CHATLLM_API_KEY:
-        logger.error("CHATLLM_API_KEY не встановлено!")
-        return
+    # Створюємо бота
+    bot = KitchenBot()
     
-    if not os.getenv('GOOGLE_CREDENTIALS'):
-        logger.error("GOOGLE_CREDENTIALS не встановлено!")
-        return
+    # Створюємо додаток
+    application = Application.builder().token(TOKEN).build()
     
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Додаємо обробники
+    application.add_handler(CommandHandler("start", bot.start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
+    application.add_handler(CallbackQueryHandler(bot.handle_callback))
     
-    # Реєструємо команди
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("products", show_products))
-    application.add_handler(CommandHandler("expiring", show_expiring))
-    application.add_handler(CommandHandler("shopping", show_shopping))
-    application.add_handler(CommandHandler("stats", show_stats))
-    application.add_handler(CommandHandler("remove", cmd_remove))
+    # Додаємо обробник помилок
+    application.add_error_handler(bot.error_handler)
     
-    # Обробка повідомлень (має бути останньою)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("🤖 Розумний кухонний бот запущено з повним функціоналом!")
+    # Запускаємо бота
+    print("🤖 Кухонний бот запущено!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
